@@ -19,7 +19,10 @@ from afd_plugin.compat.npu import (  # noqa: E402
 from tests.unit.fakes.vllm_config import (  # noqa: E402
     async_moe_config as _async_moe_config,
 )
-from tests.unit.fakes.vllm_config import npu_dspark_config  # noqa: E402
+from tests.unit.fakes.vllm_config import (  # noqa: E402
+    npu_async_cam_target_graph_config,
+    npu_dspark_config,
+)
 from tests.unit.fakes.vllm_config import (  # noqa: E402
     npu_vllm_config as _vllm_config,
 )
@@ -35,8 +38,8 @@ ASYNC_CAM = dict(connector="CAMAsyncAFDConnector", async_dp=True)
     [
         ("attention", True, True, "deepseek_v4", False, None),
         ("ffn", True, True, "deepseek_v4", False, None),
-        ("attention", False, True, "deepseek_v4", False, "DSpark requires eager"),
-        ("ffn", False, True, "deepseek_v4", False, "DSpark requires eager"),
+        ("attention", False, True, "deepseek_v4", False, "draft Graph requires target"),
+        ("ffn", False, True, "deepseek_v4", False, None),
         (
             "attention",
             True,
@@ -48,8 +51,9 @@ ASYNC_CAM = dict(connector="CAMAsyncAFDConnector", async_dp=True)
         ("ffn", True, True, "deepseek_v2", False, "DSpark supports only DeepSeek-V4"),
         ("ffn", True, True, "deepseek_v4", True, None),
         ("ffn", True, False, "deepseek_v4", True, None),
-        ("attention", True, False, "deepseek_v4", False, "eager Attention"),
-        ("ffn", False, False, "deepseek_v4", True, "DSpark requires eager"),
+        ("attention", True, False, "deepseek_v4", False, None),
+        ("ffn", False, False, "deepseek_v4", True, None),
+        ("attention", False, False, "deepseek_v4", False, None),
     ],
 )
 def test_dspark_feature_boundaries(
@@ -58,12 +62,26 @@ def test_dspark_feature_boundaries(
     monkeypatch.setenv("AFD_ASYNC_CAM_LAYERED_GMM", "1" if layered else "0")
     config = npu_dspark_config(role=role, draft_eager=draft_eager)
     config.model_config.enforce_eager = target_eager
+    if role == "attention" and not target_eager:
+        config.compilation_config.mode = 0
+        config.compilation_config.cudagraph_mode.name = "FULL_DECODE_ONLY"
     config.model_config.hf_text_config.model_type = model_type
     if error:
         with pytest.raises(RuntimeError, match=error):
             fail_if_unsupported_npu_afd_features(config)
     else:
         fail_if_unsupported_npu_afd_features(config)
+
+
+@pytest.mark.parametrize("draft_eager", [True, False])
+def test_dspark_target_graph_reuses_tp4(monkeypatch, draft_eager):
+    monkeypatch.setenv("AFD_ASYNC_CAM_LAYERED_GMM", "0")
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")
+    config = npu_dspark_config(tp_size=4, draft_eager=draft_eager)
+    config.model_config.enforce_eager = False
+    config.compilation_config.mode = 0
+    config.compilation_config.cudagraph_mode.name = "FULL_DECODE_ONLY"
+    fail_if_unsupported_npu_afd_features(config)
 
 
 @pytest.mark.parametrize(
@@ -187,7 +205,7 @@ def _mla_dbo(cudagraph_mode, **model_fields):
         ),
         pytest.param(
             _config_with(model={"enforce_eager": False}, **ASYNC_CAM),
-            "only eager",
+            "DeepSeek-V4",
             id="async-graph",
         ),
         pytest.param(
@@ -268,6 +286,41 @@ def test_npu_feature_validation(config, error):
         if error
         else nullcontext()
     ):
+        fail_if_unsupported_npu_afd_features(config)
+
+
+@pytest.mark.parametrize("dp_size", [1, 2])
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_async_cam_target_graph_feature_admission(monkeypatch, dp_size, tp_size):
+    monkeypatch.setenv("AFD_ASYNC_CAM_LAYERED_GMM", "0")
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")
+    config = npu_async_cam_target_graph_config(
+        data_parallel_size=dp_size,
+        tensor_parallel_size=tp_size,
+        num_attention_ranks=dp_size * tp_size,
+    )
+    fail_if_unsupported_npu_afd_features(config)
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        (
+            "speculative_config",
+            SimpleNamespace(method="mtp"),
+            "DSpark speculation only",
+        ),
+        ("kv_transfer_config", object(), "does not support PD"),
+    ],
+)
+def test_async_cam_target_graph_feature_excludes_other_speculation_and_pd(
+    monkeypatch, field, value, error
+):
+    monkeypatch.setenv("AFD_ASYNC_CAM_LAYERED_GMM", "0")
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")
+    config = npu_async_cam_target_graph_config()
+    setattr(config, field, value)
+    with pytest.raises(RuntimeError, match=error):
         fail_if_unsupported_npu_afd_features(config)
 
 
