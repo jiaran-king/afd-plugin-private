@@ -548,6 +548,7 @@ def test_npu_async_v2_constructor_validates_before_native_and_connector_init(
     def native_init(self, vllm_config, device):
         events.append("native")
         self.vllm_config = vllm_config
+        self.speculative_config = vllm_config.speculative_config
 
     connector = SimpleNamespace(control_plane=None)
 
@@ -670,8 +671,8 @@ _NPU_GRAPH = {
         ),
         pytest.param(
             {**_NPU_ASYNC, "model.enforce_eager": False},
-            _err("eager"),
-            id="reject-async-cam-graph",
+            _err("MRV2 DeepSeek-V4"),
+            id="reject-async-cam-non-dsv4-graph",
         ),
         pytest.param(
             {**_NPU_ASYNC, "par.pipeline_parallel_size": 2},
@@ -712,6 +713,7 @@ _NPU_GRAPH = {
 )
 def test_npu_v2_validator_outcome(overrides, error):
     config, call = _validator_call(overrides)
+    config.model_config.hf_text_config = config.model_config.hf_config
     with _expect(error):
         validate_npu_model_runner_v2_config(
             config,
